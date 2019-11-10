@@ -133,6 +133,7 @@ var (
 // current time, and a new log file is created using the original log file name.
 // If the length of the write is greater than MaxSize, an error is returned.
 func (l *Logger) Write(p []byte) (n int, err error) {
+	// todo 限频,全局限频or按logger限频?
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -149,7 +150,8 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	if l.size+writeLen > l.max() {
+	// todo 在独立协程中定时检查文件的size,以支持多进程共享日志文件
+	if l.size > l.max() {
 		if err := l.rotate(); err != nil {
 			return 0, err
 		}
@@ -205,6 +207,7 @@ func (l *Logger) rotate() error {
 
 // openNew opens a new log file for writing, moving any old log file out of the
 // way.  This methods assumes the file has already been closed.
+// todo 在独立的协程中检查日志文件是否被重命名或删除,如果被重命名或删除重新新建打开, 避免向原来的文件描述符里写入, 以支持多进程共享日志模式
 func (l *Logger) openNew() error {
 	err := os.MkdirAll(l.dir(), 0755)
 	if err != nil {
