@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -113,6 +114,7 @@ type Logger struct {
 
 	millCh    chan bool
 	startMill sync.Once
+	limiter  *rate.Limiter
 }
 
 var (
@@ -133,9 +135,12 @@ var (
 // current time, and a new log file is created using the original log file name.
 // If the length of the write is greater than MaxSize, an error is returned.
 func (l *Logger) Write(p []byte) (n int, err error) {
-	// todo 限频,全局限频or按logger限频?
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.limiter!=nil && !l.limiter.Allow() {
+		return 0,nil
+	}
 
 	writeLen := int64(len(p))
 	if writeLen > l.max() {
@@ -151,6 +156,9 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	}
 
 	// todo 在独立协程中定时检查文件的size,以支持多进程共享日志文件
+	// 如果文件达到上限, 先检查lock文件， 如果不存在，先创建lock文件禁止其他进程重命名，然后创建一个新的临时文件名命名的新日志文件，然后修改log.file到新文件，然后重命名旧文件，然后重命名临时文件为日志文件名.
+	// 重命名后需使用 os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, mode) 新建,但不会影响其他进程继续写日志.
+	// 其他进程，在独立协程中定时os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)打开日志文件重新赋值到l.file
 	if l.size > l.max() {
 		if err := l.rotate(); err != nil {
 			return 0, err
@@ -191,6 +199,16 @@ func (l *Logger) Rotate() error {
 	return l.rotate()
 }
 
+func (l *Logger) SetLimiter(lim *rate.Limiter) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.limiter = lim
+}
+
+func (l *Logger) GetLimiter() *rate.Limiter {
+	return l.limiter
+}
+
 // rotate closes the current file, moves it aside with a timestamp in the name,
 // (if it exists), opens a new file with the original filename, and then runs
 // post-rotation processing and removal.
@@ -207,7 +225,6 @@ func (l *Logger) rotate() error {
 
 // openNew opens a new log file for writing, moving any old log file out of the
 // way.  This methods assumes the file has already been closed.
-// todo 在独立的协程中检查日志文件是否被重命名或删除,如果被重命名或删除重新新建打开, 避免向原来的文件描述符里写入, 以支持多进程共享日志模式
 func (l *Logger) openNew() error {
 	err := os.MkdirAll(l.dir(), 0755)
 	if err != nil {
